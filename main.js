@@ -1,5 +1,9 @@
+function randomRange(i,j) {
+	return Math.floor(Math.random() * (j - i + 1)) + i;
+}
+
 function pickRandom(x) {
-	return x[parseInt(Math.random() * x.length)];
+	return x[randomRange(0, x.length-1)];
 }
 
 //random normalized color
@@ -203,7 +207,7 @@ var Map = makeClass({
 		//populate rooms through the map
 		var roomCount = 10;
 		for (var roomIndex = 0; roomIndex < roomCount; ++roomIndex) {
-			var blockCount = 10;
+			var blockCount = randomRange(2, 10);
 			for (var blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
 				assert(block !== undefined);
 				var newBlock = growRandomDirection(block, blockIndex == 0);
@@ -353,6 +357,7 @@ var Map = makeClass({
 });
 
 var Game = makeClass({
+	uid : 0,
 	init : function() {
 		this.resetObjects();
 	},
@@ -366,6 +371,7 @@ var Game = makeClass({
 		if (this.onReset !== undefined) this.onReset();
 	},
 	addObject : function(obj) {
+		obj.uid = this.uid++;
 		this.objs.push(obj);
 	},
 	update : function(dt) {	
@@ -858,8 +864,15 @@ var Door = makeClass({
 	},
 	hitByShot : function(shot) {
 		this.solid = false;
-		this.collidesWithObjects = false;
-		this.nextSolidTime = game.time + 10;
+		this.nextSolidTime = game.time + 1000;	//stay open until walked through
+	},
+	pretouch : function(other) {
+		if (!this.solid) { 
+			if (other.isa(Player)) {
+				this.nextSolidTime = game.time + 5;
+			}
+			return true;
+		}
 	},
 	update : function(dt) {
 		Door.superProto.update.apply(this, arguments);
@@ -1021,11 +1034,12 @@ var Player = makeClass({
 	
 		//TODO do the attaching in the GameObject
 		if (lastRoom !== this.room) {
+			var doorsToRemove = [];
 			if (lastRoom !== undefined) {
 				for (var i = 0; i < game.objs.length; ++i) {
 					var obj = game.objs[i];
 					if (obj.isa(Door) && obj.room == lastRoom) {
-						obj.remove = true;
+						doorsToRemove.push(obj);
 					}
 				}
 			}
@@ -1045,12 +1059,42 @@ var Player = makeClass({
 									(wx + .5) * blockSizeX,
 									(wy + .5) * blockSizeY
 								];
-								pos[dim] -= .5 * blockSize[dim];								
-								new Door({pos : pos});
+								pos[dim] -= .5 * blockSize[dim];
+								var found = false;
+								//check all to-remove doors... don't remove it if you find a match (and don't create it as well)
+								for (var i = 0; i < doorsToRemove.length; ++i) {
+									var door = doorsToRemove[i];
+									var dist = vec2.dist(doorsToRemove[i].pos, pos);
+									if (dist < 1) {
+										found = true;
+										doorsToRemove.splice(i, 1);
+										break;
+									}
+								}
+								//check all newly created doors... don't remove if you find a match
+								if (!found) {
+									for (var i = 0; i < game.objs.length; ++i) {
+										var obj = game.objs[i];
+										if (obj.isa(Door)) {
+											var dist = vec2.dist(obj.pos, pos);
+											console.log('dist',dist);
+											if (dist < 1) {
+												found = true;
+												break;
+											}	
+										}
+									}
+								}
+								if (!found) {
+									new Door({pos : pos});
+								}
 							}
 						}
 					}
 				}
+			}
+			for (var i = 0; i < doorsToRemove.length; ++i) {
+				doorsToRemove[i].remove = true;
 			}
 		}
 
