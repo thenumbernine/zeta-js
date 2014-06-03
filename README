@@ -1,1 +1,25 @@
 http://ihavenoparachute.com/zetatron
+
+depends on my js-util project
+
+keys:
+wasd = move/look
+space = jump
+mouse = aim
+click = shoot
+
+TODO
+fix up room generation
+fix up block placement generation 
+	- incorporate simplex noise
+fix up color generation (preset distinct colors)
+fix up collision (sliding collisions and shots especially)
+fix up movement (get rid of all jumping acceleration)
+add textures to blocks, shots, etc
+add shootable blocks
+add secrets
+add monsters
+add keys to doors
+	- driven by switches?  or by touch?  or by shot?
+add more weaopns
+add bosses

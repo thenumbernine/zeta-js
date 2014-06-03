@@ -23,18 +23,37 @@ function resize() {
 	GL.resize();
 }
 
-var MAP_SIZE_X = 16;
-var MAP_SIZE_Y = 16;
+var player;
+
+var quad;
+var defaultShader;
+var backgroundShader;
+
+var sysThisTime = 0;
+var sysLastTime = 0;
+var frameAccumTime = 0;
+var fixedDeltaTime = 1/20;
+
+
+var mapSizeX = 64;
+var mapSizeY = 64;
 
 var TILE_TYPE_EMPTY = 0;
 var TILE_TYPE_SOLID = 1;
+var TILE_TYPE_LADDER = 2;
 
 var tileInfos = [];
 tileInfos[TILE_TYPE_EMPTY] = {
-	solid : false 
+	dontDraw : true,
+	solid : false
 };
 tileInfos[TILE_TYPE_SOLID] = {
-	solid : true
+	solid : true,
+	color : [0,1,1,1]
+};
+tileInfos[TILE_TYPE_LADDER] = {
+	canClimb : true,
+	color : [1,1,0,1]
 };
 
 var doorSize = 4;
@@ -49,18 +68,31 @@ var Block = makeClass({
 		this.pos = [rx, ry];
 		this.color = [1,1,1];
 	},
-	draw : function(blockX, blockY) {
+	draw : function(blockX, blockY, map) {
 		for (var j = 0; j < blockSizeY; ++j) {
 			for (var i = 0; i < blockSizeX; ++i) {
 				var tileType = this.tiles[i + blockSizeX * j];
-				if (tileType) {
+				var tileInfo = tileInfos[tileType];
+				if (!tileInfo.dontDraw) 
+				{
+					var nbhd = []; 
+					for (var oj = 0; oj < 3; ++oj) {
+						nbhd[oj] = [];
+						for (var oi = 0; oi < 3; ++oi) {
+							nbhd[oj][oi] = map.getTileType(blockX * blockSizeX + i + oi - 1, blockY * blockSizeY + j + oj - 1);
+						}
+					}
 					quad.draw({
+						shader : tileInfo.shader || defaultShader,
 						uniforms : {
-							color : [this.color[0], this.color[1], this.color[2], 1],
-							size : [0,0,1,1],
+							color : tileInfo.color,
+							bbox : [0,0,1,1],
+							nbhd0 : nbhd[0],
+							nbhd1 : nbhd[1],
+							nbhd2 : nbhd[2],
 							offset : [
-								i + blockSizeX * blockX - player.viewPos[0],
-								j + blockSizeY * blockY - player.viewPos[1]
+								i + blockSizeX * blockX,
+								j + blockSizeY * blockY
 							]
 						}
 					});
@@ -92,6 +124,229 @@ var Room = makeClass({
 	}
 });
 
+var MapGenerator = makeClass({
+	process : function(map) {
+		var allFreeBlocks = [];
+		for (var j = 0; j < map.size[1]; ++j) {
+			for (var i = 0; i < map.size[0]; ++i) {
+				allFreeBlocks.push([i,j]);
+			}
+		}
+	
+		var createBlock = function(rx, ry) {
+			if (!(rx >= 0 && ry >= 0 && rx < map.size[0] && ry < map.size[1])) {
+				throw 'failed to create block at invalid coordinates '+rx+', '+ry;
+			}
+			assert(map.blocks[ry][rx] === undefined);
+			var block = new Block(rx, ry);
+			map.blocks[ry][rx] = block;
+			
+			return block;
+		}
+		
+		var pickRandomFreeBlock = function() {
+			var freeBlockPos = allFreeBlocks.splice(parseInt(Math.random() * allFreeBlocks.length), 1)[0];
+			return createBlock(freeBlockPos[0], freeBlockPos[1]);
+		};
+
+		var growRandomDirection = function(block, doorType) {
+			var rx = block.pos[0];
+			var ry = block.pos[1];
+			var allNeighborDirs = [];
+			for (var side in sides) {
+				var dir = sides[side];
+				var nx = rx + dir[0];
+				var ny = ry + dir[1];
+				if (nx < 0 || ny < 0 || nx >= map.size[0] || ny >= map.size[1]) continue;	//can't spawn oob block
+				var neighbor = map.getBlock(nx, ny);
+				//block should not yet be there, and should be in-bounds
+				if (neighbor) continue;
+				allNeighborDirs.push(side);
+			}
+			if (!allNeighborDirs.length) {
+				console.log('couldnt find direction');
+				return;
+			}
+			var side = pickRandom(allNeighborDirs);
+			var dir = sides[side];
+
+			var nx = rx + dir[0];
+			var ny = ry + dir[1];
+			var newBlock = createBlock(nx, ny);
+
+			//tear down the wall
+			var dim = side == 'up' || side == 'down' ? 1 : 0;
+			var wx = rx + (dir[0] > 0 ? 1 : 0);
+			var wy = ry + (dir[1] > 0 ? 1 : 0);
+			if (!doorType) {
+				map.walls[wy][wx][dim].solid = false;
+			} else {
+				map.walls[wy][wx][dim].door = doorType;
+			}
+
+			//remove from free list
+			var found = false;
+			for (var i = 0; i < allFreeBlocks.length; ++i) {
+				var freeBlockPos = allFreeBlocks[i];
+				if (freeBlockPos[0] == nx && freeBlockPos[1] == ny) {
+					allFreeBlocks.splice(i, 1);
+					found = true;
+					break;
+				}
+			}
+			assert(found);
+
+			return newBlock;
+		}
+
+		var placeItemInside = function() {};
+
+		
+		var startBlock = pickRandomFreeBlock();
+		map.startBlock = startBlock;
+		var startRoom = new Room();
+		startRoom.addBlock(startBlock);
+		var block = startBlock;
+		var room = startRoom;
+
+		//populate rooms through the map
+		var numRooms = 20;
+		for (var roomIndex = 0; roomIndex < numRooms; ++roomIndex) {
+			var blockCount = randomRange(2, 20);
+			for (var blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
+				assert(block !== undefined);
+				var newBlock = growRandomDirection(block, blockIndex == 0);
+				if (newBlock === undefined) {	//if we couldn't grow then pick a random block and try again (TODO enumerate all valid growable and pick from them?)
+					var newBlock = growRandomDirection(block, blockIndex == 0);
+					//newBlock = pickRandom(room.blocks);
+					if (newBlock === undefined) break;
+					block = newBlock;
+				} else {			//if we could then continue off that block
+					block = newBlock;
+					room.addBlock(block);
+				}
+			}
+			if (room.blocks.length > 0) {
+				map.rooms.push(room);
+				placeItemInside(block);
+			
+				block = pickRandom(room.blocks);
+				room = new Room();
+			}
+		}
+
+
+		//generate tiles accordingly
+		for (var rj = 0; rj < map.size[1]; ++rj) {
+			for (var ri = 0; ri < map.size[0]; ++ri) {
+				var block = map.blocks[rj][ri];
+				if (!block) continue;
+				var nbhd = {
+					left : map.walls[rj][ri][0],
+					down : map.walls[rj][ri][1],
+					right : map.walls[rj][ri+1][0],
+					up : map.walls[rj+1][ri][1]
+				};
+				for (var tj = 0; tj < blockSizeY; ++tj) {
+					for (var ti = 0; ti < blockSizeX; ++ti) {
+						//ladders
+						if (ti == 8) {
+							block.tiles[ti + blockSizeX * tj] = TILE_TYPE_LADDER;
+						}					
+						
+						/*
+						if (ti == 0 && map.walls[rj][ri][0]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+						if (ti == blockSizeX-1 && map.walls[rj][ri+1][0]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+						if (tj == 0 && map.walls[rj][ri][1]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+						if (tj == blockSizeY-1 && map.walls[rj+1][ri][1]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+						*/
+						
+						var dx = (ti + .5) - blockSizeX / 2;
+						var dy = (tj + .5) - blockSizeY / 2;
+						var adx = Math.abs(dx);
+						var ady = Math.abs(dy);
+
+						var cx = dx * 2 / blockSizeX;
+						var cy = dy * 2 / blockSizeY;
+				
+						var dist = 0;
+						if (cx < 0 && nbhd.left.solid) dist += cx * cx;
+						if (cx > 0 && nbhd.right.solid) dist += cx * cx;
+						if (cy < 0 && nbhd.down.solid) dist += cy * cy;
+						if (cy > 0 && nbhd.up.solid) dist += cy * cy;
+
+						/*
+						var noise = simplexNoise(4 * (ti / blockSizeX + ri), 4 * (tj / blockSizeY + rj));
+						var noise01 = .5 + .5 * noise;
+						dist += noise01;
+						if (dist < 0) dist += 1;
+						*/
+
+						var skip = false;
+						if (dist >= (blockSizeX-2)/blockSizeX) {
+							for (side in sides) {
+								if (nbhd[side].door) {
+									//get on the right side
+									var dot = (sides[side][0] * cx + sides[side][1] * cy) / Math.sqrt(cx * cx + cy * cy);
+									if (dot > Math.cos(45 * Math.PI / 180)) {
+										if (Math.min(adx,ady) <= doorSize / 2) {
+											skip = true;
+											break;
+										}
+									}
+								}
+							}
+					
+							if (!skip) {
+								block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+							}
+						}
+						/*if (!skip) {
+							if (Math.random() < .1) {
+								block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+							}		
+						}*/	
+				
+						//steps?
+						if (tj == 3 || tj == 11) {
+							if (block.tiles[ti + blockSizeX * tj] != TILE_TYPE_LADDER) {
+								block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		//generate doors
+		map.doors = [];
+		for (var rj = 0; rj <= map.size[1]; ++rj) {
+			for (var ri = 0; ri <= map.size[0]; ++ri) {
+				for (var dim = 0; dim < 2; ++dim) {
+					if (map.walls[rj][ri][dim].door) {
+						var pos = [
+							(ri + .5) * blockSizeX,
+							(rj + .5) * blockSizeY
+						];
+						pos[dim] -= .5 * blockSize[dim];
+						//clear out blocks around door
+						var xmin = Math.floor(pos[0])-2;
+						var ymin = Math.floor(pos[1])-2;
+						for (var y = ymin; y < ymin + 4; ++y) {
+							for (var x = xmin; x < xmin + 4; ++x) {
+								if (map.getTileType(x,y) != TILE_TYPE_LADDER) {
+									map.setTileType(x,y,TILE_TYPE_EMPTY);
+								}
+							}
+						}
+						map.doors.push({pos:pos});
+					}
+				}
+			}
+		}	
+	}
+});
+
 var Map = makeClass({
 	init : function(args) {
 		assert(args.size);
@@ -114,202 +369,10 @@ var Map = makeClass({
 				this.walls[rj][ri] = [{solid:true}, {solid:true}];
 			}
 		}
-
-		var allFreeBlocks = [];
-		for (var j = 0; j < this.size[1]; ++j) {
-			for (var i = 0; i < this.size[0]; ++i) {
-				allFreeBlocks.push([i,j]);
-			}
-		}
-	
-		var thiz = this;
-		var createBlock = function(rx, ry) {
-			if (!(rx >= 0 && ry >= 0 && rx < thiz.size[0] && ry < thiz.size[1])) {
-				throw 'failed to create block at invalid coordinates '+rx+', '+ry;
-			}
-			assert(thiz.blocks[ry][rx] === undefined);
-			var block = new Block(rx, ry);
-			thiz.blocks[ry][rx] = block;
-			
-			console.log('creating block at '+rx+', '+ry);
-			
-			return block;
-		}
 		
-		var pickRandomFreeBlock = function() {
-			var freeBlockPos = allFreeBlocks.splice(parseInt(Math.random() * allFreeBlocks.length), 1)[0];
-			return createBlock(freeBlockPos[0], freeBlockPos[1]);
-		};
-
-		var growRandomDirection = function(block, doorType) {
-			var rx = block.pos[0];
-			var ry = block.pos[1];
-			var allNeighborDirs = [];
-			for (var side in sides) {
-				var dir = sides[side];
-				var nx = rx + dir[0];
-				var ny = ry + dir[1];
-				if (nx < 0 || ny < 0 || nx >= thiz.size[0] || ny >= thiz.size[1]) continue;	//can't spawn oob block
-				var neighbor = thiz.getBlock(nx, ny);
-				//block should not yet be there, and should be in-bounds
-				if (neighbor) continue;
-				allNeighborDirs.push(side);
-			}
-			if (!allNeighborDirs.length) {
-				console.log('couldnt find direction');
-				return;
-			}
-			var side = pickRandom(allNeighborDirs);
-			var dir = sides[side];
-
-			console.log('extending along side '+side+' dir '+dir+' from source '+block.pos);
-			var nx = rx + dir[0];
-			var ny = ry + dir[1];
-			var newBlock = createBlock(nx, ny);
-
-			//tear down the wall
-			var dim = side == 'up' || side == 'down' ? 1 : 0;
-			var wx = rx + (dir[0] > 0 ? 1 : 0);
-			var wy = ry + (dir[1] > 0 ? 1 : 0);
-			console.log('removing wall at ', wx, wy, dim);
-			if (!doorType) {
-				thiz.walls[wy][wx][dim].solid = false;
-			} else {
-				thiz.walls[wy][wx][dim].door = doorType;
-			}
-
-			//remove from free list
-			var found = false;
-			for (var i = 0; i < allFreeBlocks.length; ++i) {
-				var freeBlockPos = allFreeBlocks[i];
-				if (freeBlockPos[0] == nx && freeBlockPos[1] == ny) {
-					allFreeBlocks.splice(i, 1);
-					found = true;
-					break;
-				}
-			}
-			assert(found);
-
-			return newBlock;
-		}
-
-		var placeItemInside = function() {};
-
-		
-		var startBlock = pickRandomFreeBlock();
-		this.startBlock = startBlock;
-		var startRoom = new Room();
-		startRoom.addBlock(startBlock);
-		var block = startBlock;
-		var room = startRoom;
 		this.rooms = [];
 
-		//populate rooms through the map
-		var roomCount = 10;
-		for (var roomIndex = 0; roomIndex < roomCount; ++roomIndex) {
-			var blockCount = randomRange(2, 10);
-			for (var blockIndex = 0; blockIndex < blockCount; ++blockIndex) {
-				assert(block !== undefined);
-				var newBlock = growRandomDirection(block, blockIndex == 0);
-				if (newBlock === undefined) {	//if we couldn't grow then pick a random block and try again (TODO enumerate all valid growable and pick from them?)
-					var newBlock = growRandomDirection(block, blockIndex == 0);
-					//newBlock = pickRandom(room.blocks);
-					if (newBlock === undefined) break;
-					block = newBlock;
-				} else {			//if we could then continue off that block
-					block = newBlock;
-					room.addBlock(block);
-				}
-			}
-			if (room.blocks.length > 0) {
-				this.rooms.push(room);
-				placeItemInside(block);
-			
-				block = pickRandom(room.blocks);
-				room = new Room();
-			}
-		}
-
-
-		//generate tiles accordingly
-		for (var rj = 0; rj < this.size[1]; ++rj) {
-			for (var ri = 0; ri < this.size[0]; ++ri) {
-				var block = this.blocks[rj][ri];
-				if (!block) continue;
-				var nbhd = {
-					left : this.walls[rj][ri][0],
-					down : this.walls[rj][ri][1],
-					right : this.walls[rj][ri+1][0],
-					up : this.walls[rj+1][ri][1]
-				};
-				for (var tj = 0; tj < blockSizeY; ++tj) {
-					for (var ti = 0; ti < blockSizeX; ++ti) {
-						/*
-						if (ti == 0 && this.walls[rj][ri][0]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-						if (ti == blockSizeX-1 && this.walls[rj][ri+1][0]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-						if (tj == 0 && this.walls[rj][ri][1]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-						if (tj == blockSizeY-1 && this.walls[rj+1][ri][1]) block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-						*/
-						
-						var dx = (ti + .5) - blockSizeX / 2;
-						var dy = (tj + .5) - blockSizeY / 2;
-						var adx = Math.abs(dx);
-						var ady = Math.abs(dy);
-
-						var cx = dx * 2 / blockSizeX;
-						var cy = dy * 2 / blockSizeY;
-				
-						var dist = 0;
-						if (cx < 0 && nbhd.left.solid) dist += cx * cx;
-						if (cx > 0 && nbhd.right.solid) dist += cx * cx;
-						if (cy < 0 && nbhd.down.solid) dist += cy * cy;
-						if (cy > 0 && nbhd.up.solid) dist += cy * cy;
-						
-						var skip = false;
-						if (dist >= (blockSizeX-2)/blockSizeX) {
-							for (side in sides) {
-								if (nbhd[side].door) {
-									//get on the right side
-									var dot = (sides[side][0] * cx + sides[side][1] * cy) / Math.sqrt(cx * cx + cy * cy);
-									if (dot > Math.cos(45 * Math.PI / 180)) {
-										if (Math.min(adx,ady) <= doorSize / 2) {
-											skip = true;
-											break;
-										}
-									}
-								}
-							}
-					
-							if (!skip) {
-								block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-							}
-						}
-						if (!skip) {
-							if (Math.random() < .1) {
-								block.tiles[ti + blockSizeX * tj] = TILE_TYPE_SOLID;
-							}		
-						}		
-					}
-				}
-			}
-		}
-
-		//generate doors
-		this.doors = [];
-		for (var rj = 0; rj <= this.size[1]; ++rj) {
-			for (var ri = 0; ri <= this.size[0]; ++ri) {
-				for (var side = 0; side < 2; ++side) {
-					if (this.walls[rj][ri][side].door) {
-						var pos = [
-							(ri + .5) * blockSizeX,
-							(rj + .5) * blockSizeY
-						];
-						pos[side] -= .5 * blockSize[side];
-						this.doors.push({pos:pos});
-					}
-				}
-			}
-		}
+		(new MapGenerator()).process(this);
 	},
 	getTileInfo : function(gtx, gty) {
 		var tileType = this.getTileType(gtx, gty);
@@ -323,6 +386,16 @@ var Map = makeClass({
 		var tx = gtx - rx * blockSizeX;
 		var ty = gty - ry * blockSizeY;
 		return block.tiles[tx + blockSizeX * ty];
+	},
+	setTileType : function(gtx, gty, tileType) {
+		var rx = Math.floor(gtx / blockSizeX);
+		var ry = Math.floor(gty / blockSizeY);
+		var block = this.getBlock(rx, ry);
+		if (block === undefined) return false;
+		var tx = gtx - rx * blockSizeX;
+		var ty = gty - ry * blockSizeY;
+		block.tiles[tx + blockSizeX * ty] = tileType;
+		return true;
 	},
 	getBlock : function(i, j) {
 		if (!this.blocks) return;
@@ -347,8 +420,9 @@ var Map = makeClass({
 			for (var ri = xmin; ri <= xmax; ++ri) {
 				var block = this.blocks[rj][ri];
 				if (block) {
-					if (block.room == room) {
-						block.draw(ri, rj);
+					//if (block.room == room) 
+					{
+						block.draw(ri, rj, this);
 					}
 				}
 			}
@@ -829,11 +903,12 @@ var GameObject = makeClass({
 	draw : function() {
 		quad.draw({
 			uniforms : {
+				shader : this.shader || defaultShader,
 				color : [this.color[0], this.color[1], this.color[2], this.color[3]],
-				size : [this.bbox.min[0], this.bbox.min[1], this.bbox.max[0], this.bbox.max[1]],
+				bbox : [this.bbox.min[0], this.bbox.min[1], this.bbox.max[0], this.bbox.max[1]],
 				offset : [
-					this.pos[0] - player.viewPos[0],
-					this.pos[1] - player.viewPos[1]
+					this.pos[0],
+					this.pos[1]
 				]
 			}
 		});
@@ -858,8 +933,8 @@ var Door = makeClass({
 	pushPriority : 100,
 	bbox : {min : [-doorSize/2, -doorSize/2], max : [doorSize/2, doorSize/2]},
 	nextSolidTime : -1,
+	color : [0,.5,1,1],
 	init : function() {
-		this.color = randomColor();
 		Door.super.apply(this, arguments);
 	},
 	hitByShot : function(shot) {
@@ -869,7 +944,7 @@ var Door = makeClass({
 	pretouch : function(other) {
 		if (!this.solid) { 
 			if (other.isa(Player)) {
-				this.nextSolidTime = game.time + 5;
+				this.nextSolidTime = game.time + .1;
 			}
 			return true;
 		}
@@ -933,7 +1008,7 @@ var BasicShot = makeClass({
 var weapons = [
 	{
 		name : 'shot',
-		duration : .5,
+		duration : 1,
 		onShoot : function(player) {
 			if (game.time - player.lastShootTime < this.duration) return;
 			player.lastShootTime = game.time;
@@ -1077,7 +1152,6 @@ var Player = makeClass({
 										var obj = game.objs[i];
 										if (obj.isa(Door)) {
 											var dist = vec2.dist(obj.pos, pos);
-											console.log('dist',dist);
 											if (dist < 1) {
 												found = true;
 												break;
@@ -1263,17 +1337,7 @@ var Player = makeClass({
 		this.ongroundLast = this.onground;
 	}
 });
-var map = new Map({size : [MAP_SIZE_X, MAP_SIZE_Y]});
-var player;
-
-var quad;
-var defaultShader;
-
-var sysThisTime = 0;
-var sysLastTime = 0;
-var frameAccumTime = 0;
-var fixedDeltaTime = 1/20;
-
+var map = new Map({size : [mapSizeX, mapSizeY]});
 
 function update() {
 	GL.draw();
@@ -1294,13 +1358,37 @@ function update() {
 			}
 		}
 	}
-	
+
+	//update modelview according to player viewpos
+	mat4.identity(GL.mvMat);
+	//column-major inverse translation matrix
+	GL.mvMat[12] = -player.viewPos[0];
+	GL.mvMat[13] = -player.viewPos[1];
+
+	//draw background
+	var viewBounds = getViewBounds();
+	quad.draw({
+		shader : backgroundShader,
+		uniforms : {
+			bbox : [
+				viewBounds.min[0],
+				viewBounds.min[1],
+				viewBounds.max[0],
+				viewBounds.max[1]
+			],
+			offset : [0,0],
+			color : [1,1,1,1]
+		}
+	});
+
+	//draw map
 	map.draw(
 		Math.floor(player.pos[0] / blockSizeX),
 		Math.floor(player.pos[1] / blockSizeY),
 		1,
 		player.room);
 
+	//draw all objects
 	game.draw();
 	
 	requestAnimFrame(update);
@@ -1370,18 +1458,27 @@ function keypress(e) {
 	e.preventDefault();
 }
 
-function mousemove(e) {
-	var xfrac = e.pageX / window.innerWidth;
-	var yfrac = 1 - e.pageY / window.innerHeight;
+function getViewBounds() {
 	//remap pixel coordinates to GL coordinates
 	var fovY = GL.view.fovY;
 	var aspectRatio = GL.canvas.width / GL.canvas.height;
-	var viewxmin = player.viewPos[0] - aspectRatio * fovY;
-	var viewxmax = player.viewPos[0] + aspectRatio * fovY;
-	var viewymin = player.viewPos[1] - fovY;
-	var viewymax = player.viewPos[1] + fovY;
-	player.aimPos[0] = viewxmin * (1 - xfrac) + viewxmax * xfrac;
-	player.aimPos[1] = viewymin * (1 - yfrac) + viewymax * yfrac;
+	var bounds = {
+		min : vec2.fromValues(
+			player.viewPos[0] - aspectRatio * fovY,
+			player.viewPos[1] - fovY),
+		max : vec2.fromValues(
+			player.viewPos[0] + aspectRatio * fovY,
+			player.viewPos[1] + fovY)
+	};
+	return bounds;
+}
+
+function mousemove(e) {
+	var xfrac = e.pageX / window.innerWidth;
+	var yfrac = 1 - e.pageY / window.innerHeight;
+	var viewBounds = getViewBounds();
+	player.aimPos[0] = viewBounds.min[0] * (1 - xfrac) + viewBounds.max[0] * xfrac;
+	player.aimPos[1] = viewBounds.min[1] * (1 - yfrac) + viewBounds.max[1] * yfrac;
 }
 
 function mousedown(e) {
@@ -1429,29 +1526,135 @@ $(document).ready(function(){
 	GL.view.fovY = 10;
 	GL.view.ortho = true;
 
-	defaultShader = new GL.ShaderProgram({
-		vertexPrecision : 'best',
-		vertexCode : mlstr(function(){/*
+	var quadVertexShader = new GL.VertexShader({
+		code : GL.vertexPrecision + mlstr(function(){/*
 attribute vec4 vertex;
-uniform vec2 offset;
 uniform mat4 mvMat;
 uniform mat4 projMat;
-uniform vec4 size;
+
+uniform vec2 offset;
+uniform vec4 bbox;
+
+varying vec2 uvtx;	//unit vertex coordinates: [0,1]^2
+varying vec2 wvtx;	//world coordinates
+
 void main() {
-	vec2 bboxmin = size.xy;
-	vec2 bboxmax = size.zw;
+	uvtx = vertex.xy;
+	vec2 bboxmin = bbox.xy;
+	vec2 bboxmax = bbox.zw;
 	vec2 bboxsize = bboxmax - bboxmin;
 	vec4 tvtx = vertex;
-	tvtx.xy *= bboxsize; 
+	tvtx.xy *= bboxsize;
 	tvtx.xy += bboxmin + offset;
+	wvtx = tvtx.xy;
 	gl_Position = projMat * mvMat * tvtx;
 }
-*/}),
+*/})
+	});
+
+	defaultShader = new GL.ShaderProgram({
+		vertexShader : quadVertexShader,
 		fragmentPrecision : 'best',
 		fragmentCode : mlstr(function(){/*
 uniform vec4 color;
+varying vec2 uvtx;
+varying vec2 wvtx;
 void main() {
 	gl_FragColor = color; 
+}
+*/})
+	});
+
+	var voronoiDistanceCode = mlstr(function(){/*
+float voronoiDistance(vec2 pos) {
+
+	vec2 voronoiCenters[8];
+	voronoiCenters[0] = vec2(7.8263692594256e-06, 0.13153778814317);
+	voronoiCenters[1] = vec2(0.75560532219503, 0.45865013192345);
+	voronoiCenters[2] = vec2(0.53276723741217, 0.21895918632809);
+	voronoiCenters[3] = vec2(0.047044616214486, 0.67886471686832);
+	voronoiCenters[4] = vec2(0.67929640583661, 0.93469289594083);
+	voronoiCenters[5] = vec2(0.38350207748986, 0.51941637206795);
+	voronoiCenters[6] = vec2(0.83096534611237, 0.034572110527461);
+	voronoiCenters[7] = vec2(0.053461635044525, 0.52970019333516);
+
+	vec3 voronoiColors[8];
+	voronoiColors[0] = vec3(7.8263692594256e-06, 0.13153778814317, 0.75560532219503);
+	voronoiColors[1] = vec3(0.45865013192345, 0.53276723741217, 0.21895918632809);
+	voronoiColors[2] = vec3(0.047044616214486, 0.67886471686832, 0.67929640583661);
+	voronoiColors[3] = vec3(0.93469289594083, 0.38350207748986, 0.51941637206795);
+	voronoiColors[4] = vec3(0.83096534611237, 0.034572110527461, 0.053461635044525);
+	voronoiColors[5] = vec3(0.52970019333516, 0.67114938407724, 0.0076981862111474);
+	voronoiColors[6] = vec3(0.38341565075489, 0.066842237518561, 0.41748597445781);
+	voronoiColors[7] = vec3(0.6867727123605, 0.58897664285683, 0.93043649472782);
+
+	float minDist = 10.;
+	for (int i = 0; i < 8; ++i) {
+		for (float ofx = -1.; ofx < 1.5; ofx += 1.) {
+			for (float ofy = -1.; ofy < 1.5; ofy += 1.) {
+				float dist = length(voronoiCenters[i] - pos + vec2(ofx, ofy));
+				if (dist < minDist) {
+					minDist = dist;
+				}
+			}
+		}
+	}
+	return minDist;
+}
+*/});
+
+	var blockShader = new GL.ShaderProgram({
+		vertexShader : quadVertexShader,
+		fragmentPrecision : 'best',
+		fragmentCode : voronoiDistanceCode + mlstr(function(){/*
+uniform vec4 color;
+varying vec2 uvtx;
+varying vec2 wvtx;
+
+uniform vec3 nbhd0;
+uniform vec3 nbhd1;
+uniform vec3 nbhd2;
+
+void main() {
+	float dist = 0.;//voronoiDistance(uvtx);
+	dist = 1. - dist;
+	dist *= dist;
+	gl_FragColor.rgb = dist * color.rgb;
+	gl_FragColor.a = 1.;
+
+	vec2 fvtx = uvtx * 2. - vec2(1.);
+
+	//if (nbhd1.y != nbhd0.x || nbhd1.y != nbhd1.x || nbhd1.y != nbhd2.x) 
+	if (nbhd1.y != nbhd1.x)
+		gl_FragColor *= min(1. + fvtx.x, 1.);
+	//if (nbhd1.y != nbhd0.z || nbhd1.y != nbhd1.z || nbhd1.y != nbhd2.z) 
+	if (nbhd1.y != nbhd1.z)
+		gl_FragColor *= min(1. - fvtx.x, 1.);
+	//if (nbhd1.y != nbhd0.x || nbhd1.y != nbhd0.y || nbhd1.y != nbhd0.z) 
+	if (nbhd1.y != nbhd0.y)
+		gl_FragColor *= min(1. + fvtx.y, 1.);
+	//if (nbhd1.y != nbhd2.x || nbhd1.y != nbhd2.y || nbhd1.y != nbhd2.z) 
+	if (nbhd1.y != nbhd2.y)
+		gl_FragColor *= min(1. - fvtx.y, 1.);
+}
+*/})
+	});
+
+	tileInfos[TILE_TYPE_SOLID].shader = blockShader;
+
+	tileInfos[TILE_TYPE_LADDER].shader = new GL.ShaderProgram({
+		vertexShader : quadVertexShader,
+		fragmentPrecision : 'best',
+		fragmentCode : mlstr(function(){/*
+uniform vec4 color;
+varying vec2 uvtx;
+varying vec2 wvtx;
+#define M_PI 3.14159265359
+void main() {
+	vec2 fvtx = uvtx * 2. - vec2(1.);
+	float amp = 1. + sin(fvtx.y * M_PI) * .5 * sin(fvtx.x * M_PI);
+	float fade = 1. - amp * amp;
+	gl_FragColor = color * fade;
 }
 */})
 	});
@@ -1469,6 +1672,28 @@ void main() {
 		parent : null,
 		static : true
 	});
+
+	backgroundShader = new GL.ShaderProgram({
+		vertexShader : quadVertexShader,
+		fragmentPrecision : 'best',
+		fragmentCode : voronoiDistanceCode + mlstr(function(){/*
+uniform vec4 color;
+varying vec2 uvtx;
+varying vec2 wvtx;
+void main() {
+	vec2 block = mod(wvtx / 16., vec2(1.));
+	//float dist = voronoiDistance(block);
+	vec2 abl = abs(block);
+	vec2 obl = abs(1. - block);
+	float mabl = max(max(abl.x, abl.y), max(obl.x, obl.y)) * .5;
+	float dist = mabl; 
+	gl_FragColor = color * dist;
+}
+*/})
+	});
+
+	gl.enable(gl.BLEND);
+	gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
 	$(window)
 		.resize(resize)
