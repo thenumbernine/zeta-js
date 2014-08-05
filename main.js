@@ -1671,7 +1671,7 @@ void main() {
 		scene : renderer.scene,
 		mode : gl.TRIANGLE_STRIP,
 		attrs : {
-			vertex : GL.unitQuadVertexBuffer
+			vertex : renderer.unitQuadVertexBuffer
 		},
 		uniforms : {
 			mvMat : renderer.scene.mvMat,
