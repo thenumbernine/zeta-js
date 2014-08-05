@@ -1,3 +1,5 @@
+var renderer, gl;
+
 function randomRange(i,j) {
 	return Math.floor(Math.random() * (j - i + 1)) + i;
 }
@@ -20,7 +22,7 @@ function randomColor() {
 function resize() {
 	canvas.width = window.innerWidth;
 	canvas.height = window.innerHeight;
-	GL.resize();
+	renderer.resize();
 }
 
 var player;
@@ -1340,7 +1342,7 @@ var Player = makeClass({
 var map = new Map({size : [mapSizeX, mapSizeY]});
 
 function update() {
-	GL.draw();
+	renderer.draw();
 	var dt = 1/30;
 	
 	sysLastTime = sysThisTime;
@@ -1360,10 +1362,10 @@ function update() {
 	}
 
 	//update modelview according to player viewpos
-	mat4.identity(GL.mvMat);
+	mat4.identity(renderer.scene.mvMat);
 	//column-major inverse translation matrix
-	GL.mvMat[12] = -player.viewPos[0];
-	GL.mvMat[13] = -player.viewPos[1];
+	renderer.scene.mvMat[12] = -player.viewPos[0];
+	renderer.scene.mvMat[13] = -player.viewPos[1];
 
 	//draw background
 	var viewBounds = getViewBounds();
@@ -1460,8 +1462,8 @@ function keypress(e) {
 
 function getViewBounds() {
 	//remap pixel coordinates to GL coordinates
-	var fovY = GL.view.fovY;
-	var aspectRatio = GL.canvas.width / GL.canvas.height;
+	var fovY = renderer.view.fovY;
+	var aspectRatio = renderer.canvas.width / renderer.canvas.height;
 	var bounds = {
 		min : vec2.fromValues(
 			player.viewPos[0] - aspectRatio * fovY,
@@ -1510,7 +1512,8 @@ $(document).ready(function(){
 	}).prependTo(document.body).get(0);
 
 	try {
-		gl = GL.init(canvas);
+		renderer = new GL.CanvasRenderer({canvas:canvas});
+		gl = renderer.context;
 	} catch (e) {
 		$(canvas).remove();
 		$('#webglfail').show();
@@ -1521,12 +1524,13 @@ $(document).ready(function(){
 	gl.disable(gl.CULL_FACE);
 	gl.disable(gl.DEPTH_TEST);
 	
-	GL.view.zNear = -100;
-	GL.view.zFar = 100;
-	GL.view.fovY = 10;
-	GL.view.ortho = true;
+	renderer.view.zNear = -100;
+	renderer.view.zFar = 100;
+	renderer.view.fovY = 10;
+	renderer.view.ortho = true;
 
 	var quadVertexShader = new GL.VertexShader({
+		context : gl,
 		code : GL.vertexPrecision + mlstr(function(){/*
 attribute vec4 vertex;
 uniform mat4 mvMat;
@@ -1553,6 +1557,7 @@ void main() {
 	});
 
 	defaultShader = new GL.ShaderProgram({
+		context : gl,
 		vertexShader : quadVertexShader,
 		fragmentPrecision : 'best',
 		fragmentCode : mlstr(function(){/*
@@ -1604,6 +1609,7 @@ float voronoiDistance(vec2 pos) {
 */});
 
 	var blockShader = new GL.ShaderProgram({
+		context : gl,
 		vertexShader : quadVertexShader,
 		fragmentPrecision : 'best',
 		fragmentCode : voronoiDistanceCode + mlstr(function(){/*
@@ -1643,6 +1649,7 @@ void main() {
 	tileInfos[TILE_TYPE_SOLID].shader = blockShader;
 
 	tileInfos[TILE_TYPE_LADDER].shader = new GL.ShaderProgram({
+		context : gl,
 		vertexShader : quadVertexShader,
 		fragmentPrecision : 'best',
 		fragmentCode : mlstr(function(){/*
@@ -1660,13 +1667,15 @@ void main() {
 	});
 
 	quad = new GL.SceneObject({
+		context : gl,
+		scene : renderer.scene,
 		mode : gl.TRIANGLE_STRIP,
 		attrs : {
 			vertex : GL.unitQuadVertexBuffer
 		},
 		uniforms : {
-			mvMat : GL.mvMat,
-			projMat : GL.projMat
+			mvMat : renderer.scene.mvMat,
+			projMat : renderer.scene.projMat
 		},
 		shader : defaultShader,
 		parent : null,
@@ -1674,6 +1683,7 @@ void main() {
 	});
 
 	backgroundShader = new GL.ShaderProgram({
+		context : gl,
 		vertexShader : quadVertexShader,
 		fragmentPrecision : 'best',
 		fragmentCode : voronoiDistanceCode + mlstr(function(){/*
